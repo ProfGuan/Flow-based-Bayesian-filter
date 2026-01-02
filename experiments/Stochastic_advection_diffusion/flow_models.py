@@ -361,46 +361,50 @@ class Flow_based_Bayesian_Filter:
 
         D_T_Py_inv = D.T @ Py_var_inv
         D_T_Py_inv_D = D.T @ Py_var_inv @ D
-        zx_noise = distributions.MultivariateNormal(loc=torch.zeros(self.m).to(device),
-                                                        covariance_matrix=Px_var)
+        I_m = torch.eye(self.m, device=device)
+
         ######### init samples #########
-        m_0 = torch.zeros(self.m).to(device)
-        q2 = SAD.sigma ** 2 * SAD.dt
-        P_0 = 1e-10 * torch.eye(self.m).to(device)
-        init_Gaussian = distributions.MultivariateNormal(loc=m_0, covariance_matrix=P_0)
+        m0 = torch.zeros(self.m).to(device)
+        P0 = 1e-5 * torch.eye(self.m).to(device)
+        init_Gaussian = distributions.MultivariateNormal(loc=m0, covariance_matrix=P0)
         x_old_sample = init_Gaussian.rsample([ensemble_size])        
         zx_old_sample = self.Tx(x_old_sample)[0]
 
         zx_old_mean = zx_old_sample.mean(0).reshape(-1, 1)
         zx_old_var = torch.diag(zx_old_sample.std(0))
-        ensemble_sample_set = torch.zeros([T-1, ensemble_size, self.m])
-        inflat = 0.
-
+        ensemble_set = torch.zeros([T-1, ensemble_size, self.m])
+        jitter = 1e-5
+                                                                    
         for t in range(1, T):
-            ######### P_smooth #########
+            ######### Correction Step #########
             zy_new = zy_new_all[t:t+1].T
-            Kgain = zx_old_var @ D_T_Py_inv
-            zx_smooth_old_var = (torch.eye(self.m).to(device) - Kgain @ D) @ zx_old_var
-            zx_smooth_old_mean = zx_old_mean + Kgain @ (zy_new - C - D @ zx_old_mean)
+            S = D @ zx_old_var @ D.T + Py_var
+            S = S + jitter * torch.eye(D.shape[0], device=device)
             
-            ######### P_filter #########
+            # calculate Kalman Gain
+            DP = D @ zx_old_var                            # (n, m)
+            L = torch.linalg.cholesky(S)                   # (n, n)
+            Y = torch.cholesky_solve(DP, L)                # (n, m)
+            K = Y.T   
+                                            
+            I_KD = I_m - K @ D
+            zx_smooth_old_var = I_KD @ zx_old_var @ I_KD.T + K @ Py_var @ K.T
+            zx_smooth_old_mean = zx_old_mean + K @ (zy_new - C - D @ zx_old_mean)
+            
+            ######### Propagation Step #########
             zx_filter_new_var = B[t] @ zx_smooth_old_var @ B[t].T + Px_var
-#             zx_filter_new_var = zx_filter_new_var + inflat * torch.eye(self.m).to(device)
             zx_filter_new_mean = A[t] + B[t] @ zx_smooth_old_mean
             
-            zx_filter_new_var_inflat = zx_filter_new_var + inflat * torch.eye(self.m).to(device)
+            zx_filter_new_var = zx_filter_new_var + jitter * torch.eye(self.m).to(device)
             zx_filter_new_Gaussian = distributions.MultivariateNormal(loc=zx_filter_new_mean.flatten(), 
-                                                                      covariance_matrix=zx_filter_new_var_inflat)
-            
+                                                                      covariance_matrix=zx_filter_new_var)
             zx_filter_new_sample = zx_filter_new_Gaussian.rsample([ensemble_size])
             zx_old_var = zx_filter_new_var
             zx_old_mean = zx_filter_new_mean
             
             x_new_sample = self.Tx(zx_filter_new_sample, mode='inverse')[0]
-            ensemble_sample_set[t-1] = x_new_sample
-#             zx_old_var = torch.cov(zx_filter_new_sample.T)
-#             zx_old_mean = A[t] + B[t] @ zx_smooth_old_mean
-        return ensemble_sample_set    
+            ensemble_set[t-1] = x_new_sample
+        return ensemble_set    
     
     
     
